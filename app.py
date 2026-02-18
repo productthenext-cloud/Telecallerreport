@@ -1,3 +1,35 @@
+# ==================== RENDER CONFIGURATION ====================
+# This MUST be the first thing in your file for Render deployment
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+# Configure for Render's read-only filesystem
+if os.environ.get('RENDER', False):
+    # Use /tmp directory for writable storage on Render
+    TEMP_DIR = Path(tempfile.gettempdir()) / 'telecaller_dashboard'
+    TEMP_DIR.mkdir(exist_ok=True)
+    
+    # Set environment variables for data storage
+    os.environ['DATA_DIR'] = str(TEMP_DIR)
+    os.environ['TZ'] = 'Asia/Kathmandu'  # Set your timezone
+    
+    # Change working directory to temp for writable access
+    os.chdir(TEMP_DIR)
+    
+    # Add current directory to path
+    sys.path.insert(0, str(Path.cwd()))
+# ==================== END RENDER CONFIG ====================
+
+# Your existing imports continue here...
+import streamlit as st
+import pandas as pd
+from datetime import datetime, timedelta
+# ... rest of your imports
+
+
+# app.py
 import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta
@@ -6,6 +38,8 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from data_processor import DataProcessor
 import time
+import hashlib
+import json
 
 # Page configuration
 st.set_page_config(
@@ -78,32 +112,6 @@ st.markdown("""
         color: #FF9800;
     }
     
-    .tab-content {
-        padding: 1rem;
-    }
-    
-    .report-table {
-        width: 100%;
-        border-collapse: collapse;
-    }
-    
-    .report-table th {
-        background-color: #f0f2f6;
-        padding: 12px;
-        text-align: left;
-        font-weight: bold;
-        color: #333;
-    }
-    
-    .report-table td {
-        padding: 12px;
-        border-bottom: 1px solid #ddd;
-    }
-    
-    .report-table tr:hover {
-        background-color: #f5f5f5;
-    }
-    
     .badge {
         padding: 4px 8px;
         border-radius: 4px;
@@ -131,55 +139,357 @@ st.markdown("""
         color: #721c24;
     }
     
-    .date-range-btn {
-        padding: 8px 16px;
-        margin-right: 8px;
-        border-radius: 5px;
-        border: 1px solid #ddd;
-        background-color: white;
-        cursor: pointer;
+    .badge-admin {
+        background-color: #9c27b0;
+        color: white;
     }
     
-    .date-range-btn.active {
-        background-color: #1976D2;
+    .badge-telecaller {
+        background-color: #2196f3;
         color: white;
-        border-color: #1976D2;
+    }
+    
+    .day-display {
+        background-color: #f8f9fa;
+        border: 1px solid #dee2e6;
+        border-radius: 0.375rem;
+        padding: 0.5rem 0.75rem;
+        color: #495057;
+        font-weight: 500;
+    }
+    
+    .role-badge {
+        display: inline-block;
+        padding: 0.25rem 0.5rem;
+        border-radius: 4px;
+        font-size: 0.75rem;
+        font-weight: 600;
+        margin-left: 0.5rem;
+    }
+    
+    .user-card {
+        background-color: white;
+        padding: 1rem;
+        border-radius: 8px;
+        margin-bottom: 1rem;
+        border-left: 4px solid #1976D2;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    }
+    
+    .stButton button {
+        width: 100%;
+    }
+    
+    div[data-testid="stDataFrame"] {
+        width: 100%;
     }
 </style>
 """, unsafe_allow_html=True)
 
+# Helper function to get day name from date
+def get_day_from_date(date_value):
+    days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    return days[date_value.weekday()]
+
+# Authentication functions
+def hash_password(password):
+    return hashlib.sha256(password.encode()).hexdigest()
+
+def verify_password(password, hashed):
+    return hash_password(password) == hashed
+
+# Initialize session state
+if 'authenticated' not in st.session_state:
+    st.session_state.authenticated = False
+    st.session_state.user = None
+    st.session_state.user_role = None
+    st.session_state.user_name = None
+    st.session_state.telecaller_name = None
+    st.session_state.user_permissions = {}
+    st.session_state.edit_mode = False
+    st.session_state.editing_report = None
+    st.session_state.editing_report_date = None
+    st.session_state.managing_user = None
+
+# User Management Class
+class UserManager:
+    def __init__(self, processor):
+        self.processor = processor
+        self.load_users()
+    
+    def load_users(self):
+        """Load users from Google Sheets or local storage"""
+        try:
+            self.users = self.processor.gs_service.get_users()
+            if not self.users:
+                self.create_default_users()
+        except:
+            self.create_default_users()
+    
+    def create_default_users(self):
+        """Create default users"""
+        default_users = {
+            'admin': {
+                'password': hash_password('admin123'),
+                'role': 'admin',
+                'name': 'Administrator',
+                'telecaller_name': None,
+                'permissions': {
+                    'can_edit_all': True,
+                    'can_delete_all': True,
+                    'can_add_reports': True,
+                    'can_edit_own': True,
+                    'can_view_all': True,
+                    'can_manage_users': True,
+                    'can_export_data': True,
+                    'can_view_analytics': True
+                },
+                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'is_active': True
+            }
+        }
+        
+        telecallers = ['Prakriti', 'Raphiya', 'Sudikshya', 'Shiru']
+        for telecaller in telecallers:
+            username = telecaller.lower()
+            default_users[username] = {
+                'password': hash_password(f'{username}123'),
+                'role': 'telecaller',
+                'name': telecaller,
+                'telecaller_name': telecaller,
+                'permissions': {
+                    'can_edit_all': False,
+                    'can_delete_all': False,
+                    'can_add_reports': True,
+                    'can_edit_own': True,
+                    'can_view_all': False,
+                    'can_manage_users': False,
+                    'can_export_data': False,
+                    'can_view_analytics': True
+                },
+                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'is_active': True
+            }
+        
+        self.users = default_users
+        self.save_users()
+    
+    def save_users(self):
+        """Save users to Google Sheets"""
+        try:
+            self.processor.gs_service.save_users(self.users)
+        except Exception as e:
+            st.error(f"Error saving users: {str(e)}")
+    
+    def get_all_users(self):
+        """Get all users"""
+        return self.users
+    
+    def add_user(self, username, user_data):
+        """Add new user"""
+        if username in self.users:
+            return False, "Username already exists"
+        
+        user_data['password'] = hash_password(user_data['password'])
+        user_data['created_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        user_data['updated_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        user_data['is_active'] = True
+        
+        if user_data['role'] == 'admin':
+            user_data['permissions'] = {
+                'can_edit_all': True,
+                'can_delete_all': True,
+                'can_add_reports': True,
+                'can_edit_own': True,
+                'can_view_all': True,
+                'can_manage_users': True,
+                'can_export_data': True,
+                'can_view_analytics': True
+            }
+        else:
+            user_data['permissions'] = {
+                'can_edit_all': False,
+                'can_delete_all': False,
+                'can_add_reports': True,
+                'can_edit_own': True,
+                'can_view_all': False,
+                'can_manage_users': False,
+                'can_export_data': False,
+                'can_view_analytics': True
+            }
+        
+        self.users[username] = user_data
+        self.save_users()
+        return True, "User added successfully"
+    
+    def delete_user(self, username):
+        """Delete user"""
+        if username == 'admin':
+            return False, "Cannot delete admin user"
+        
+        if username in self.users:
+            del self.users[username]
+            self.save_users()
+            return True, "User deleted successfully"
+        return False, "User not found"
+    
+    def update_permissions(self, username, permissions):
+        """Update user permissions"""
+        if username in self.users:
+            self.users[username]['permissions'] = permissions
+            self.users[username]['updated_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            self.save_users()
+            return True, "Permissions updated successfully"
+        return False, "User not found"
+    
+    def authenticate(self, username, password):
+        """Authenticate user"""
+        if username in self.users and self.users[username]['is_active']:
+            if verify_password(password, self.users[username]['password']):
+                return True, self.users[username]
+        return False, None
+
+# Initialize User Manager
+user_manager = UserManager(processor)
+
+# Permission check functions
+def can_edit_report(report_telecaller):
+    if st.session_state.user_role == 'admin':
+        return True
+    elif st.session_state.user_permissions.get('can_edit_all', False):
+        return True
+    elif st.session_state.user_permissions.get('can_edit_own', False):
+        return report_telecaller == st.session_state.telecaller_name
+    return False
+
+def can_delete_report(report_telecaller):
+    if st.session_state.user_role == 'admin':
+        return True
+    return st.session_state.user_permissions.get('can_delete_all', False)
+
+def can_view_all_reports():
+    if st.session_state.user_role == 'admin':
+        return True
+    return st.session_state.user_permissions.get('can_view_all', False)
+
+def can_manage_users():
+    if st.session_state.user_role == 'admin':
+        return True
+    return st.session_state.user_permissions.get('can_manage_users', False)
+
+def can_export_data():
+    if st.session_state.user_role == 'admin':
+        return True
+    return st.session_state.user_permissions.get('can_export_data', False)
+
+# Logout function
+def logout():
+    for key in ['authenticated', 'user', 'user_role', 'user_name', 'telecaller_name', 
+                'user_permissions', 'edit_mode', 'editing_report', 'editing_report_date']:
+        st.session_state[key] = None if key != 'authenticated' else False
+    st.rerun()
+
+# Login page
+def login_page():
+    st.markdown('<h1 class="main-header">📞 Telecaller Dashboard Login</h1>', unsafe_allow_html=True)
+    
+    col1, col2, col3 = st.columns([1, 2, 1])
+    
+    with col2:
+        st.markdown("### 🔐 Login")
+        
+        username = st.text_input("Username", placeholder="Enter your username")
+        password = st.text_input("Password", type="password", placeholder="Enter your password")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("Login", use_container_width=True, type="primary"):
+                success, user_data = user_manager.authenticate(username, password)
+                if success:
+                    st.session_state.authenticated = True
+                    st.session_state.user = username
+                    st.session_state.user_role = user_data['role']
+                    st.session_state.user_name = user_data['name']
+                    st.session_state.telecaller_name = user_data.get('telecaller_name')
+                    st.session_state.user_permissions = user_data.get('permissions', {})
+                    st.success(f"Welcome, {user_data['name']}!")
+                    st.rerun()
+                else:
+                    st.error("Invalid username or password")
+        
+        with col2:
+            if st.button("Clear", use_container_width=True):
+                st.rerun()
+        
+        st.markdown("---")
+        # Final recommendation - Clean and secure
+st.markdown("---")
+with st.expander("🔐 Demo Credentials (Click to expand)"):
+    st.markdown("""
+    **Available Demo Accounts:**
+    | Role | Username | Password |
+    |------|----------|----------|
+    | Admin | `admin` | `••••••••` |
+    | Prakriti | `prakriti` | `••••••••` |
+    | Raphiya | `raphiya` | `••••••••` |
+    | Sudikshya | `sudikshya` | `••••••••` |
+    | Shiru | `shiru` | `••••••••` |
+    
+    *Passwords are hidden for security. Contact admin if needed.*
+    """)
+
+# If not authenticated, show login page
+if not st.session_state.authenticated:
+    login_page()
+    st.stop()
+
 # Sidebar
 with st.sidebar:
-    st.markdown("## 📞 Telecaller Dashboard")
+    st.markdown(f"""
+    ## 📞 Telecaller Dashboard
+    **Welcome, {st.session_state.user_name}!**
+    <span class="role-badge {'badge-admin' if st.session_state.user_role == 'admin' else 'badge-telecaller'}">
+        {st.session_state.user_role.upper()}
+    </span>
+    """, unsafe_allow_html=True)
     st.markdown("---")
     
     # Navigation
-    page = st.radio(
-        "Navigation",
-        ["Dashboard", "Daily Reports", "Add Report", "Analysis", "System Status"],
-        label_visibility="collapsed"
-    )
+    nav_options = ["Dashboard", "Daily Reports", "Add Report", "Analysis"]
+    
+    if st.session_state.user_role == 'admin' or can_view_all_reports():
+        nav_options.append("Edit History")
+    
+    if st.session_state.user_role == 'admin' or can_manage_users():
+        nav_options.append("User Management")
+    
+    nav_options.append("System Status")
+    
+    if st.session_state.user_role == 'telecaller' and 'My Reports' not in nav_options:
+        nav_options.insert(1, "My Reports")
+        if "Daily Reports" in nav_options:
+            nav_options.remove("Daily Reports")
+    
+    page = st.radio("Navigation", nav_options, label_visibility="collapsed")
     
     st.markdown("---")
-    
-    # Quick Actions
     st.markdown("### Quick Actions")
     if st.button("🔄 Refresh Data"):
+        st.cache_data.clear()
         st.rerun()
     
-    if st.button("⚙️ Setup System"):
-        st.info("System setup functionality would be implemented here")
+    if st.button("🚪 Logout"):
+        logout()
     
     st.markdown("---")
-    
-    # Info
     st.markdown("### System Info")
     st.markdown(f"**Last Updated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     st.markdown(f"**Timezone:** {time.tzname[0]}")
 
-# Main Content
+# ==================== DASHBOARD PAGE ====================
 if page == "Dashboard":
-    # Header
     st.markdown('<h1 class="main-header">📊 Telecaller Performance Dashboard</h1>', unsafe_allow_html=True)
     
     # Date Range Selector
@@ -192,73 +502,80 @@ if page == "Dashboard":
         "All Time": "all"
     }
     
-    selected_range = "today"
+    if 'selected_range' not in st.session_state:
+        st.session_state.selected_range = "today"
+    
     for i, (label, value) in enumerate(date_ranges.items()):
-        if i == 0:
-            if col1.button(label, key=f"range_{value}"):
-                selected_range = value
-        elif i == 1:
-            if col2.button(label, key=f"range_{value}"):
-                selected_range = value
-        elif i == 2:
-            if col3.button(label, key=f"range_{value}"):
-                selected_range = value
-        elif i == 3:
-            if col4.button(label, key=f"range_{value}"):
-                selected_range = value
-        elif i == 4:
-            if col5.button(label, key=f"range_{value}"):
-                selected_range = value
+        button_type = "primary" if st.session_state.selected_range == value else "secondary"
+        if i == 0 and col1.button(label, key=f"range_{value}", type=button_type):
+            st.session_state.selected_range = value
+            st.rerun()
+        elif i == 1 and col2.button(label, key=f"range_{value}", type=button_type):
+            st.session_state.selected_range = value
+            st.rerun()
+        elif i == 2 and col3.button(label, key=f"range_{value}", type=button_type):
+            st.session_state.selected_range = value
+            st.rerun()
+        elif i == 3 and col4.button(label, key=f"range_{value}", type=button_type):
+            st.session_state.selected_range = value
+            st.rerun()
+        elif i == 4 and col5.button(label, key=f"range_{value}", type=button_type):
+            st.session_state.selected_range = value
+            st.rerun()
     
     # Get dashboard stats
-    stats = processor.get_dashboard_stats(selected_range)
+    if st.session_state.user_role == 'admin' or can_view_all_reports():
+        stats = processor.get_dashboard_stats(st.session_state.selected_range)
+    else:
+        stats = processor.get_dashboard_stats(st.session_state.selected_range, 
+                                             telecaller=st.session_state.telecaller_name)
     
-    # Stats Cards - Row 1
+    # Stats Cards
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
         st.markdown(f"""
         <div class="stat-card">
-            <div class="stat-number">{stats['total_calls']:,}</div>
+            <div class="stat-number">{stats.get('total_calls', 0):,}</div>
             <div class="stat-label">Total Calls</div>
-            <div style="font-size: 0.8rem; color: #666;">Avg: {stats['avg_calls_per_day']}/day</div>
+            <div style="font-size: 0.8rem; color: #666;">Avg: {stats.get('avg_calls_per_day', 0)}/day</div>
         </div>
         """, unsafe_allow_html=True)
     
     with col2:
         st.markdown(f"""
         <div class="stat-card success-card">
-            <div class="stat-number">{stats['new_data']:,}</div>
+            <div class="stat-number">{stats.get('new_data', 0):,}</div>
             <div class="stat-label">New Data</div>
-            <div style="font-size: 0.8rem; color: #666;">Avg: {stats['avg_new_data_per_day']}/day</div>
+            <div style="font-size: 0.8rem; color: #666;">Avg: {stats.get('avg_new_data_per_day', 0)}/day</div>
         </div>
         """, unsafe_allow_html=True)
     
     with col3:
         st.markdown(f"""
         <div class="stat-card warning-card">
-            <div class="stat-number">{stats['crm_data']:,}</div>
+            <div class="stat-number">{stats.get('crm_data', 0):,}</div>
             <div class="stat-label">CRM Updates</div>
-            <div style="font-size: 0.8rem; color: #666;">{stats['crm_completion_rate']}% of calls</div>
+            <div style="font-size: 0.8rem; color: #666;">{stats.get('crm_completion_rate', 0)}% of calls</div>
         </div>
         """, unsafe_allow_html=True)
     
     with col4:
         st.markdown(f"""
         <div class="stat-card video-day">
-            <div class="stat-number">{stats['video_activities']}</div>
+            <div class="stat-number">{stats.get('video_activities', 0)}</div>
             <div class="stat-label">Video Activities</div>
-            <div style="font-size: 0.8rem; color: #666;">{stats['video_activities']} days with video</div>
+            <div style="font-size: 0.8rem; color: #666;">{stats.get('video_activities', 0)} days</div>
         </div>
         """, unsafe_allow_html=True)
     
-    # Stats Cards - Row 2
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
+        country_count = stats.get('country_data_count', 0)
         st.markdown(f"""
         <div class="stat-card">
-            <div class="stat-number">{stats['country_data']:,}</div>
+            <div class="stat-number">{country_count}</div>
             <div class="stat-label">Country Data</div>
             <div style="font-size: 0.8rem; color: #666;">International leads</div>
         </div>
@@ -267,7 +584,7 @@ if page == "Dashboard":
     with col2:
         st.markdown(f"""
         <div class="stat-card">
-            <div class="stat-number">{stats['fair_data']:,}</div>
+            <div class="stat-number">{stats.get('fair_data', 0):,}</div>
             <div class="stat-label">Fair Leads</div>
             <div style="font-size: 0.8rem; color: #666;">Event leads</div>
         </div>
@@ -276,41 +593,45 @@ if page == "Dashboard":
     with col3:
         st.markdown(f"""
         <div class="stat-card">
-            <div class="stat-number">{stats['visited_students']:,}</div>
+            <div class="stat-number">{stats.get('visited_students', 0):,}</div>
             <div class="stat-label">Visited Students</div>
             <div style="font-size: 0.8rem; color: #666;">Student visits</div>
         </div>
         """, unsafe_allow_html=True)
     
     with col4:
+        conversion_rate = stats.get('conversion_rate', 0)
         st.markdown(f"""
         <div class="stat-card success-card">
-            <div class="stat-number">{stats['conversion_rate']}%</div>
+            <div class="stat-number">{conversion_rate:.1f}%</div>
             <div class="stat-label">Conversion Rate</div>
             <div style="font-size: 0.8rem; color: #666;">New Data / Total Calls</div>
         </div>
         """, unsafe_allow_html=True)
     
-    # Charts Section
+    # Charts
     st.markdown("---")
     st.markdown("### 📈 Performance Charts")
     
     col1, col2 = st.columns(2)
     
     with col1:
-        # Weekly Summary Chart
-        weekly_data = processor.get_weekly_summary()
-        if weekly_data:
+        if st.session_state.user_role == 'admin' or can_view_all_reports():
+            weekly_data = processor.get_weekly_summary()
+        else:
+            weekly_data = processor.get_weekly_summary(telecaller=st.session_state.telecaller_name)
+        
+        if weekly_data and len(weekly_data) > 0:
             df_weekly = pd.DataFrame(weekly_data)
             fig = go.Figure()
             fig.add_trace(go.Bar(
-                x=df_weekly['formatted_date'],
+                x=df_weekly['date'],
                 y=df_weekly['total_calls'],
                 name='Total Calls',
                 marker_color='#1976D2'
             ))
             fig.add_trace(go.Bar(
-                x=df_weekly['formatted_date'],
+                x=df_weekly['date'],
                 y=df_weekly['new_data'],
                 name='New Data',
                 marker_color='#4CAF50'
@@ -319,14 +640,21 @@ if page == "Dashboard":
                 title='Last 7 Days Performance',
                 barmode='group',
                 height=400,
-                showlegend=True
+                showlegend=True,
+                xaxis_title='Date',
+                yaxis_title='Count'
             )
             st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No weekly data available. Add reports to see charts.")
     
     with col2:
-        # Performance Trend Chart
-        trend_data = processor.get_performance_trend(30)
-        if trend_data:
+        if st.session_state.user_role == 'admin' or can_view_all_reports():
+            trend_data = processor.get_performance_trend(30)
+        else:
+            trend_data = processor.get_performance_trend(30, telecaller=st.session_state.telecaller_name)
+        
+        if trend_data and len(trend_data) > 0:
             df_trend = pd.DataFrame(trend_data)
             fig = go.Figure()
             fig.add_trace(go.Scatter(
@@ -334,16 +662,14 @@ if page == "Dashboard":
                 y=df_trend['total_calls'],
                 name='Total Calls',
                 line=dict(color='#1976D2', width=3),
-                fill='tozeroy',
-                fillcolor='rgba(25, 118, 210, 0.1)'
+                mode='lines+markers'
             ))
             fig.add_trace(go.Scatter(
                 x=df_trend['date'],
                 y=df_trend['new_data'],
                 name='New Data',
                 line=dict(color='#4CAF50', width=3),
-                fill='tozeroy',
-                fillcolor='rgba(76, 175, 80, 0.1)'
+                mode='lines+markers'
             ))
             fig.update_layout(
                 title='30-Day Performance Trend',
@@ -353,72 +679,79 @@ if page == "Dashboard":
                 yaxis_title='Count'
             )
             st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No trend data available. Add reports to see charts.")
     
-    # Recent Reports
-    st.markdown("---")
-    st.markdown("### 📋 Recent Daily Reports")
-    
-    reports = processor.get_all_reports()
-    if not reports.empty:
-        # Show last 5 reports
-        recent_reports = reports.head(5)
+    # Telecaller Performance
+    if st.session_state.user_role == 'admin' or can_view_all_reports():
+        st.markdown("---")
+        st.markdown("### 👥 All Telecallers Performance")
         
-        for _, report in recent_reports.iterrows():
-            col1, col2 = st.columns([3, 1])
-            with col1:
-                date_str = report['Date'].strftime('%Y-%m-%d') if pd.notna(report['Date']) else 'Unknown Date'
-                st.markdown(f"**{date_str}** - {report.get('Day', '')}")
+        try:
+            telecaller_stats = processor.get_telecaller_performance()
+            if telecaller_stats is not None and not telecaller_stats.empty:
+                col1, col2 = st.columns(2)
                 
-                cols = st.columns(5)
-                metrics = [
-                    ('Total Calls', report.get('Total Calls', 0), '#1976D2'),
-                    ('New Data', report.get('New Data', 0), '#4CAF50'),
-                    ('CRM Data', report.get('CRM Data', 0), '#FF9800'),
-                    ('Visited Students', report.get('Visited Students', 0), '#795548'),
-                    ('Video', report.get('Video', 'No'), '#F44336' if report.get('Video') == 'Yes' else '#666')
-                ]
+                with col1:
+                    fig = px.bar(telecaller_stats,
+                                x='Telecaller',
+                                y='Total Calls',
+                                title='Total Calls by Telecaller',
+                                color='Total Calls',
+                                color_continuous_scale='Viridis')
+                    st.plotly_chart(fig, use_container_width=True)
                 
-                for i, (label, value, color) in enumerate(metrics):
-                    cols[i].metric(label, value)
+                with col2:
+                    fig = px.bar(telecaller_stats,
+                                x='Telecaller',
+                                y='New Data',
+                                title='New Data Collected by Telecaller',
+                                color='New Data',
+                                color_continuous_scale='Greens')
+                    st.plotly_chart(fig, use_container_width=True)
                 
-                if pd.notna(report.get('Other Work Description')):
-                    st.markdown(f"**Other Work:** {report['Other Work Description']}")
-            
-            with col2:
-                if report.get('Video') == 'Yes':
-                    st.markdown('<span class="badge badge-danger">Video Day</span>', unsafe_allow_html=True)
-                if pd.notna(report.get('Country Data')):
-                    st.markdown(f"**Country:** {report['Country Data']}")
-            
-            st.markdown("---")
-    else:
-        st.info("No reports found. Add your first report from the 'Add Report' page.")
+                st.markdown("#### Performance Summary")
+                st.dataframe(telecaller_stats, use_container_width=True, hide_index=True)
+            else:
+                st.info("No telecaller data available. Add reports to see statistics.")
+        except Exception as e:
+            st.info("Telecaller performance data will be available after adding reports.")
 
-elif page == "Daily Reports":
-    st.markdown('<h1 class="main-header">📋 Daily Reports</h1>', unsafe_allow_html=True)
+# ==================== DAILY REPORTS PAGE ====================
+elif page in ["Daily Reports", "My Reports"]:
+    st.markdown(f'<h1 class="main-header">📋 {page}</h1>', unsafe_allow_html=True)
     
     # Search and Filters
     with st.expander("🔍 Search & Filters", expanded=True):
-        col1, col2, col3, col4 = st.columns(4)
+        col1, col2, col3, col4, col5 = st.columns(5)
         
         with col1:
             start_date = st.date_input("Start Date", 
-                                      value=datetime.now() - timedelta(days=30))
+                                      value=datetime.now() - timedelta(days=30),
+                                      key="reports_start_date")
         
         with col2:
             end_date = st.date_input("End Date", 
-                                    value=datetime.now())
+                                    value=datetime.now(),
+                                    key="reports_end_date")
         
         with col3:
-            video_filter = st.selectbox(
-                "Video Filter",
-                ["All", "Yes", "No"],
-                index=0
-            )
+            if st.session_state.user_role == 'admin' or can_view_all_reports():
+                all_reports = processor.get_all_reports()
+                if not all_reports.empty and 'Telecaller' in all_reports.columns:
+                    telecallers = ['All'] + sorted(all_reports['Telecaller'].unique().tolist())
+                else:
+                    telecallers = ['All']
+                telecaller_filter = st.selectbox("Telecaller", telecallers, index=0, key="telecaller_filter")
+            else:
+                telecaller_filter = st.session_state.telecaller_name
+                st.text_input("Telecaller", value=telecaller_filter, disabled=True)
         
         with col4:
-            search_term = st.text_input("Search", 
-                                       placeholder="Search by country, work description...")
+            video_filter = st.selectbox("Video", ["All", "Yes", "No"], index=0, key="video_filter")
+        
+        with col5:
+            search_term = st.text_input("Search", placeholder="Search...", key="search_filter")
     
     # Apply filters
     filters = {}
@@ -431,14 +764,19 @@ elif page == "Daily Reports":
     if search_term:
         filters['search'] = search_term
     
-    # Get filtered reports
+    if st.session_state.user_role == 'admin' or can_view_all_reports():
+        if telecaller_filter != "All":
+            filters['telecaller'] = telecaller_filter
+    else:
+        filters['telecaller'] = st.session_state.telecaller_name
+    
+    # Get reports
     reports = processor.get_all_reports(filters)
     
-    # Reports count
     st.markdown(f"**Found {len(reports)} reports**")
     
     # Export button
-    if not reports.empty:
+    if can_export_data() and not reports.empty:
         csv = reports.to_csv(index=False)
         st.download_button(
             label="📥 Export to CSV",
@@ -447,240 +785,796 @@ elif page == "Daily Reports":
             mime="text/csv"
         )
     
-    # Display reports table
+    # Display reports
     if not reports.empty:
-        # Format date for display
         reports_display = reports.copy()
-        reports_display['Date'] = reports_display['Date'].dt.strftime('%Y-%m-%d')
+        reports_display['Date'] = pd.to_datetime(reports_display['Date']).dt.strftime('%Y-%m-%d')
         
-        # Show table
+        # Reorder columns for better display
+        column_order = ['Date', 'Telecaller', 'Day', 'Total Calls', 'New Data', 'CRM Data', 
+                       'Country Data', 'Fair Data', 'Visited Students', 'Video', 'Video Details']
+        available_columns = [col for col in column_order if col in reports_display.columns]
+        
         st.dataframe(
-            reports_display,
+            reports_display[available_columns],
             use_container_width=True,
-            column_config={
-                "Total Calls": st.column_config.NumberColumn(format="%d"),
-                "New Data": st.column_config.NumberColumn(format="%d"),
-                "CRM Data": st.column_config.NumberColumn(format="%d"),
-                "Fair Data": st.column_config.NumberColumn(format="%d"),
-                "Visited Students": st.column_config.NumberColumn(format="%d"),
-            }
+            hide_index=True
         )
         
-        # Edit/Delete buttons for each report
-        st.markdown("### Report Actions")
-        selected_report = st.selectbox(
-            "Select a report to edit/delete",
-            options=reports_display.index.tolist(),
-            format_func=lambda x: f"{reports_display.loc[x, 'Date']} - {reports_display.loc[x, 'Total Calls']} calls"
-        )
+        # Report Actions
+        st.markdown("### ✏️ Report Actions")
         
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("✏️ Edit Selected Report"):
-                st.session_state['editing_report'] = selected_report
-                st.rerun()
+        # Determine editable reports
+        if st.session_state.user_role == 'admin':
+            editable_reports = reports_display
+        else:
+            editable_reports = reports_display[reports_display['Telecaller'] == st.session_state.telecaller_name]
         
-        with col2:
-            if st.button("🗑️ Delete Selected Report"):
-                if st.warning("Are you sure you want to delete this report?"):
-                    # This would call processor.delete_report()
-                    st.success("Report deleted successfully!")
-                    st.rerun()
+        if not editable_reports.empty:
+            # Create a list of options for the selectbox
+            report_options = []
+            report_indices = []
+            
+            for idx in editable_reports.index:
+                date_val = editable_reports.loc[idx, 'Date']
+                telecaller_val = editable_reports.loc[idx, 'Telecaller']
+                calls_val = editable_reports.loc[idx, 'Total Calls']
+                report_options.append(f"{date_val} - {telecaller_val} - {calls_val} calls")
+                report_indices.append(idx)
+            
+            selected_idx = st.selectbox(
+                "Select a report to edit/delete",
+                options=range(len(report_options)),
+                format_func=lambda x: report_options[x],
+                key="report_select"
+            )
+            
+            selected_report_index = report_indices[selected_idx]
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("✏️ Edit Selected Report", use_container_width=True):
+                    if can_edit_report(reports.loc[selected_report_index, 'Telecaller']):
+                        st.session_state.editing_report = selected_report_index
+                        st.session_state.edit_mode = True
+                        st.session_state.editing_report_date = reports.loc[selected_report_index, 'Date']
+                        st.rerun()
+                    else:
+                        st.error("You don't have permission to edit this report!")
+            
+            with col2:
+                if st.button("🗑️ Delete Selected Report", use_container_width=True):
+                    if can_delete_report(reports.loc[selected_report_index, 'Telecaller']):
+                        # Log deletion
+                        edit_log = {
+                            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                            'user': st.session_state.user_name,
+                            'username': st.session_state.user,
+                            'role': st.session_state.user_role,
+                            'action': 'DELETE',
+                            'report_date': str(reports.loc[selected_report_index, 'Date']),
+                            'telecaller': reports.loc[selected_report_index, 'Telecaller'],
+                            'original_data': json.dumps(reports.loc[selected_report_index].to_dict(), default=str),
+                            'new_data': ''
+                        }
+                        processor.log_edit_action(edit_log)
+                        
+                        # Delete report
+                        success = processor.delete_report(selected_report_index)
+                        if success:
+                            st.success("Report deleted successfully!")
+                            time.sleep(1)
+                            st.rerun()
+                    else:
+                        st.error("You don't have permission to delete this report!")
+        else:
+            st.info("No reports available to edit.")
     else:
         st.info("No reports found. Add your first report from the 'Add Report' page.")
 
+# ==================== ADD REPORT PAGE ====================
 elif page == "Add Report":
     st.markdown('<h1 class="main-header">➕ Add Daily Report</h1>', unsafe_allow_html=True)
     
+    editing = st.session_state.get('edit_mode', False)
+    
+    if editing:
+        st.info("✏️ You are editing an existing report")
+        reports = processor.get_all_reports()
+        
+        # Find the report by date if index is not available
+        if st.session_state.editing_report is not None:
+            try:
+                if isinstance(st.session_state.editing_report, int):
+                    report_idx = st.session_state.editing_report
+                    if report_idx < len(reports):
+                        original_data = reports.iloc[report_idx]
+                    else:
+                        st.error("Report not found. Please select again.")
+                        st.session_state.edit_mode = False
+                        st.session_state.editing_report = None
+                        st.rerun()
+                else:
+                    # Try to find by date
+                    date_str = st.session_state.editing_report_date
+                    matching_reports = reports[reports['Date'].dt.strftime('%Y-%m-%d') == date_str]
+                    if not matching_reports.empty:
+                        report_idx = matching_reports.index[0]
+                        original_data = reports.loc[report_idx]
+                        st.session_state.editing_report = report_idx
+                    else:
+                        st.error("Report not found. Please select again.")
+                        st.session_state.edit_mode = False
+                        st.session_state.editing_report = None
+                        st.rerun()
+            except Exception as e:
+                st.error(f"Error loading report: {str(e)}")
+                st.session_state.edit_mode = False
+                st.session_state.editing_report = None
+                st.rerun()
+        else:
+            st.error("No report selected for editing.")
+            st.session_state.edit_mode = False
+            st.rerun()
+        
+        # Set default values
+        default_date = pd.to_datetime(original_data['Date']) if pd.notna(original_data['Date']) else datetime.now()
+        default_telecaller = original_data.get('Telecaller', 'Select Telecaller')
+        default_total_calls = int(original_data.get('Total Calls', 0))
+        default_new_data = int(original_data.get('New Data', 0))
+        default_crm_data = int(original_data.get('CRM Data', 0))
+        default_country = original_data.get('Country Data', '')
+        default_fair_data = int(original_data.get('Fair Data', 0))
+        default_visited = int(original_data.get('Visited Students', 0))
+        default_video = original_data.get('Video', 'No')
+        default_video_details = original_data.get('Video Details', '')
+        default_other_work = original_data.get('Other Work Description', '')
+        default_remarks = original_data.get('Remarks', '')
+    else:
+        default_date = datetime.now()
+        default_telecaller = st.session_state.telecaller_name if st.session_state.telecaller_name else 'Select Telecaller'
+        default_total_calls = 0
+        default_new_data = 0
+        default_crm_data = 0
+        default_country = ''
+        default_fair_data = 0
+        default_visited = 0
+        default_video = 'No'
+        default_video_details = ''
+        default_other_work = ''
+        default_remarks = ''
+    
+    # Create form
     with st.form("add_report_form"):
+        st.markdown("### 📅 Basic Information")
+        
         col1, col2, col3 = st.columns(3)
         
         with col1:
-            report_date = st.date_input("Date *", value=datetime.now())
-            total_calls = st.number_input("Total Calls *", min_value=0, value=0)
-            crm_data = st.number_input("CRM Data *", min_value=0, value=0)
+            report_date = st.date_input("Date *", value=default_date, key="report_date")
         
         with col2:
-            day = st.selectbox("Day", 
-                              ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"],
-                              index=datetime.now().weekday())
-            new_data = st.number_input("New Data *", min_value=0, value=0)
-            fair_data = st.number_input("Fair Data", min_value=0, value=0)
+            if editing and st.session_state.user_role != 'admin':
+                telecaller = st.text_input("Telecaller *", value=default_telecaller, disabled=True)
+            else:
+                telecaller_options = ["Select Telecaller", "Prakriti", "Raphiya", "Sudikshya", "Shiru", "Other"]
+                default_index = 0
+                if default_telecaller != 'Select Telecaller' and default_telecaller in telecaller_options:
+                    default_index = telecaller_options.index(default_telecaller)
+                telecaller = st.selectbox("Telecaller *", telecaller_options, index=default_index)
         
         with col3:
-            country_data = st.selectbox("Country Data",
-                                       ["", "UK", "Australia", "Canada", "USA", "New Zealand", "Other"])
-            video = st.selectbox("Video Activity *", ["No", "Yes"])
-            visited_students = st.number_input("Visited Students", min_value=0, value=0)
+            day_name = get_day_from_date(report_date)
+            st.markdown("**Day**")
+            st.markdown(f'<div class="day-display">{day_name}</div>', unsafe_allow_html=True)
+            st.caption("Auto-calculated")
         
-        # Video Details (shown only if video is Yes)
-        if video == "Yes":
-            video_details = st.text_input("Video Details *", 
-                                         placeholder="e.g., TikTok video, training video...")
-        else:
-            video_details = ""
+        st.markdown("### 📊 Call Statistics")
         
-        # Other Work Description
-        other_work = st.text_area("Other Work Description",
-                                 placeholder="e.g., Trained volunteers, helped Asmita mam, filtered rough sheet...")
+        col1, col2, col3 = st.columns(3)
         
-        # Remarks
-        remarks = st.text_area("Remarks / Notes",
-                              placeholder="Any additional notes, observations, or comments...")
+        with col1:
+            total_calls = st.number_input("Total Calls *", min_value=0, value=default_total_calls, step=1)
         
-        # Submit button
-        submitted = st.form_submit_button("💾 Save Report")
+        with col2:
+            new_data = st.number_input("New Data *", min_value=0, value=default_new_data, step=1)
+        
+        with col3:
+            crm_data = st.number_input("CRM Data *", min_value=0, value=default_crm_data, step=1)
+        
+        st.markdown("### 📝 Additional Information")
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            country_options = ["", "UK", "Australia", "Canada", "USA", "New Zealand", "Other"]
+            default_country_index = 0
+            if default_country in country_options:
+                default_country_index = country_options.index(default_country)
+            country_data = st.selectbox("Country Data", country_options, index=default_country_index)
+        
+        with col2:
+            fair_data = st.number_input("Fair Data", min_value=0, value=default_fair_data, step=1)
+        
+        with col3:
+            visited_students = st.number_input("Visited Students", min_value=0, value=default_visited, step=1)
+        
+        st.markdown("### 🎥 Video Activity")
+        
+        col1, col2 = st.columns([1, 3])
+        
+        with col1:
+            video = st.selectbox("Video Activity *", ["No", "Yes"], 
+                               index=0 if default_video == 'No' else 1)
+        
+        with col2:
+            if video == "Yes":
+                video_details = st.text_input("Video Details *", value=default_video_details,
+                                            placeholder="e.g., TikTok video, training video...")
+            else:
+                video_details = ""
+                st.text_input("Video Details", value="No video activity", disabled=True)
+        
+        st.markdown("### 📋 Other Information")
+        
+        other_work = st.text_area("Other Work Description", value=default_other_work,
+                                placeholder="e.g., Trained volunteers, helped Asmita mam...",
+                                height=100)
+        
+        remarks = st.text_area("Remarks / Notes", value=default_remarks,
+                             placeholder="Any additional notes...",
+                             height=100)
+        
+        st.markdown("---")
+        col1, col2, col3 = st.columns([1, 2, 1])
+        
+        with col2:
+            if editing:
+                submitted = st.form_submit_button("✏️ Update Report", use_container_width=True, type="primary")
+            else:
+                submitted = st.form_submit_button("💾 Save Report", use_container_width=True, type="primary")
         
         if submitted:
-            # Validation
+            errors = []
+            
+            if telecaller == "Select Telecaller":
+                errors.append("❌ Please select a telecaller!")
             if total_calls == 0:
-                st.error("Total Calls is required!")
-            elif new_data == 0:
-                st.error("New Data is required!")
-            elif crm_data == 0:
-                st.error("CRM Data is required!")
-            elif video == "Yes" and not video_details:
-                st.error("Video Details is required when Video Activity is 'Yes'!")
+                errors.append("❌ Total Calls cannot be zero!")
+            if new_data == 0:
+                errors.append("❌ New Data cannot be zero!")
+            if crm_data == 0:
+                errors.append("❌ CRM Data cannot be zero!")
+            if video == "Yes" and not video_details.strip():
+                errors.append("❌ Video Details is required when Video Activity is 'Yes'!")
+            
+            if errors:
+                for error in errors:
+                    st.error(error)
             else:
-                # Prepare report data
                 report_data = {
-                    'date': report_date.strftime('%d/%m/%Y %H:%M:%S'),
-                    'day': day,
+                    'date': report_date.strftime('%d/%m/%Y 00:00:01'),
+                    'telecaller': telecaller,
+                    'day': day_name,
                     'total_calls': total_calls,
                     'new_data': new_data,
                     'crm_data': crm_data,
                     'country_data': country_data,
                     'fair_data': fair_data,
                     'video': video,
-                    'video_details': video_details,
+                    'video_details': video_details if video == "Yes" else "",
                     'other_work': other_work,
                     'visited_students': visited_students,
                     'remarks': remarks
                 }
                 
-                # Add to Google Sheets
-                success = processor.gs_service.add_report(report_data)
-                
-                if success:
-                    st.success("✅ Report added successfully!")
-                    st.balloons()
-                    
-                    # Clear form
-                    st.rerun()
-                else:
-                    st.error("Failed to add report. Please try again.")
+                with st.spinner("Saving report..."):
+                    try:
+                        if editing:
+                            # Log edit action
+                            edit_log = {
+                                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                                'user': st.session_state.user_name,
+                                'username': st.session_state.user,
+                                'role': st.session_state.user_role,
+                                'action': 'EDIT',
+                                'report_date': report_date.strftime('%Y-%m-%d'),
+                                'telecaller': telecaller,
+                                'original_data': json.dumps(st.session_state.get('original_report_data', {}), default=str),
+                                'new_data': json.dumps(report_data, default=str)
+                            }
+                            processor.log_edit_action(edit_log)
+                            
+                            # Update report
+                            success = processor.update_report(report_idx, report_data)
+                            if success:
+                                st.success("✅ Report updated successfully!")
+                                st.session_state.edit_mode = False
+                                st.session_state.editing_report = None
+                                st.session_state.editing_report_date = None
+                                st.session_state.original_report_data = None
+                                time.sleep(1)
+                                st.rerun()
+                        else:
+                            # Add new report
+                            success = processor.add_report(report_data)
+                            if success:
+                                st.success("✅ Report added successfully!")
+                                st.balloons()
+                                time.sleep(1)
+                                st.rerun()
+                    except Exception as e:
+                        st.error(f"❌ Error saving report: {str(e)}")
+    
+    if editing:
+        if st.button("❌ Cancel Editing"):
+            st.session_state.edit_mode = False
+            st.session_state.editing_report = None
+            st.session_state.editing_report_date = None
+            st.session_state.original_report_data = None
+            st.rerun()
 
+# ==================== ANALYSIS PAGE ====================
 elif page == "Analysis":
     st.markdown('<h1 class="main-header">📈 Performance Analysis</h1>', unsafe_allow_html=True)
     
-    # Performance Metrics
+    # Analysis Period Selector
     col1, col2, col3 = st.columns(3)
     
     with col1:
         period = st.selectbox("Analysis Period", 
-                             ["Last 7 Days", "Last 30 Days", "Last 90 Days", "All Time"])
+                             ["Last 7 Days", "Last 30 Days", "Last 90 Days", "All Time"],
+                             key="analysis_period")
     
     with col2:
         metric = st.selectbox("Primary Metric",
-                             ["Total Calls", "New Data", "Conversion Rate", "Video Activities"])
+                             ["Total Calls", "New Data", "Conversion Rate", "Video Activities"],
+                             key="analysis_metric")
     
     with col3:
         grouping = st.selectbox("Group By",
-                               ["Daily", "Weekly", "Monthly"])
+                               ["Daily", "Weekly", "Monthly"],
+                               key="analysis_grouping")
     
-    # Charts
-    tab1, tab2, tab3 = st.tabs(["Trend Analysis", "Video Activities", "Country Distribution"])
+    # Analysis Tabs
+    if st.session_state.user_role == 'admin' or can_view_all_reports():
+        tabs = ["Trend Analysis", "Telecaller Comparison", "Video Activities", "Country Distribution"]
+    else:
+        tabs = ["My Performance", "Video Activities", "Country Distribution"]
     
-    with tab1:
-        # Trend Analysis
-        if period == "Last 7 Days":
-            trend_data = processor.get_performance_trend(7)
-        elif period == "Last 30 Days":
-            trend_data = processor.get_performance_trend(30)
-        elif period == "Last 90 Days":
-            trend_data = processor.get_performance_trend(90)
+    tab_list = st.tabs(tabs)
+    
+    # Tab 1: Trend Analysis
+    with tab_list[0]:
+        if st.session_state.user_role == 'admin' or can_view_all_reports():
+            st.markdown("### 📊 Overall Trend Analysis")
+            days_map = {"Last 7 Days": 7, "Last 30 Days": 30, "Last 90 Days": 90, "All Time": 365}
+            trend_data = processor.get_performance_trend(days_map.get(period, 30))
+            title_prefix = "Overall"
         else:
-            trend_data = processor.get_performance_trend(365)
+            st.markdown(f"### 📊 {st.session_state.user_name}'s Performance")
+            days_map = {"Last 7 Days": 7, "Last 30 Days": 30, "Last 90 Days": 90, "All Time": 365}
+            trend_data = processor.get_performance_trend(days_map.get(period, 30), 
+                                                        telecaller=st.session_state.telecaller_name)
+            title_prefix = st.session_state.user_name
         
-        if trend_data:
+        if trend_data and len(trend_data) > 0:
             df_trend = pd.DataFrame(trend_data)
             
+            # Ensure columns exist
+            if 'total_calls' not in df_trend.columns:
+                df_trend['total_calls'] = 0
+            if 'new_data' not in df_trend.columns:
+                df_trend['new_data'] = 0
+            
+            # Create chart
             fig = make_subplots(specs=[[{"secondary_y": True}]])
             
             fig.add_trace(
                 go.Scatter(x=df_trend['date'], y=df_trend['total_calls'], 
-                          name="Total Calls", line=dict(color='blue')),
+                          name="Total Calls", line=dict(color='#1976D2', width=3),
+                          mode='lines+markers'),
                 secondary_y=False,
             )
             
             fig.add_trace(
                 go.Scatter(x=df_trend['date'], y=df_trend['new_data'], 
-                          name="New Data", line=dict(color='green')),
+                          name="New Data", line=dict(color='#4CAF50', width=3),
+                          mode='lines+markers'),
                 secondary_y=True,
             )
             
             fig.update_layout(
-                title=f"Performance Trend - {period}",
+                title=f"{title_prefix} Performance Trend - {period}",
                 height=500,
-                showlegend=True
+                hovermode='x unified',
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
             )
             
+            fig.update_xaxes(title_text="Date")
             fig.update_yaxes(title_text="Total Calls", secondary_y=False)
             fig.update_yaxes(title_text="New Data", secondary_y=True)
             
             st.plotly_chart(fig, use_container_width=True)
+            
+            # Summary statistics
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Total Calls", f"{df_trend['total_calls'].sum():,}")
+            with col2:
+                st.metric("Total New Data", f"{df_trend['new_data'].sum():,}")
+            with col3:
+                conversion = (df_trend['new_data'].sum() / df_trend['total_calls'].sum() * 100) if df_trend['total_calls'].sum() > 0 else 0
+                st.metric("Overall Conversion", f"{conversion:.1f}%")
+            with col4:
+                st.metric("Days with Data", len(df_trend))
+        else:
+            st.info("No trend data available. Add reports to see analysis.")
     
-    with tab2:
-        # Video Activities
-        video_activities = processor.get_video_activities(20)
+    # Tab 2: Telecaller Comparison
+    if len(tabs) > 1 and (st.session_state.user_role == 'admin' or can_view_all_reports()):
+        with tab_list[1]:
+            st.markdown("### 👥 Telecaller Comparison")
+            
+            try:
+                telecaller_stats = processor.get_telecaller_performance()
+                if telecaller_stats is not None and not telecaller_stats.empty:
+                    
+                    comparison_metric = st.radio(
+                        "Select Metric to Compare",
+                        ["Total Calls", "New Data", "Conversion Rate", "Video Activities"],
+                        horizontal=True,
+                        key="comparison_metric"
+                    )
+                    
+                    col1, col2 = st.columns([2, 1])
+                    
+                    with col1:
+                        if comparison_metric == "Conversion Rate":
+                            if 'Conversion Rate' not in telecaller_stats.columns:
+                                telecaller_stats['Conversion Rate'] = (
+                                    telecaller_stats['New Data'] / telecaller_stats['Total Calls'] * 100
+                                ).round(1)
+                            fig = px.bar(telecaller_stats, 
+                                       x='Telecaller', 
+                                       y='Conversion Rate',
+                                       title='Conversion Rate by Telecaller',
+                                       color='Conversion Rate',
+                                       color_continuous_scale='RdYlGn',
+                                       text='Conversion Rate')
+                            fig.update_traces(texttemplate='%{text}%', textposition='outside')
+                        else:
+                            fig = px.bar(telecaller_stats, 
+                                       x='Telecaller', 
+                                       y=comparison_metric,
+                                       title=f'{comparison_metric} by Telecaller',
+                                       color=comparison_metric,
+                                       color_continuous_scale='Viridis')
+                        st.plotly_chart(fig, use_container_width=True)
+                    
+                    with col2:
+                        st.markdown("### Summary")
+                        for _, row in telecaller_stats.iterrows():
+                            conversion = (row['New Data'] / row['Total Calls'] * 100) if row['Total Calls'] > 0 else 0
+                            st.markdown(f"""
+                            <div class="user-card">
+                                <strong>{row['Telecaller']}</strong><br>
+                                📞 Calls: {row['Total Calls']:,}<br>
+                                📊 New Data: {row['New Data']:,}<br>
+                                📈 Conversion: {conversion:.1f}%<br>
+                                🎥 Videos: {row.get('Video Activities', 0)}
+                            </div>
+                            """, unsafe_allow_html=True)
+                else:
+                    st.info("No telecaller data available. Add reports to see comparison.")
+            except Exception as e:
+                st.info("Telecaller comparison data will be available after adding reports.")
+    
+    # Tab 3/2: Video Activities
+    video_tab_index = 2 if (st.session_state.user_role == 'admin' or can_view_all_reports()) else 1
+    with tab_list[video_tab_index]:
+        st.markdown("### 🎥 Video Activities")
         
-        if video_activities:
+        video_days = st.slider("Show last N days", min_value=7, max_value=90, value=30, key="video_days")
+        
+        if st.session_state.user_role == 'admin' or can_view_all_reports():
+            video_activities = processor.get_video_activities(video_days)
+        else:
+            video_activities = processor.get_video_activities(video_days, telecaller=st.session_state.telecaller_name)
+        
+        if video_activities and len(video_activities) > 0:
             df_video = pd.DataFrame(video_activities)
             
-            fig = px.bar(df_video, 
-                        x='formatted_date', 
-                        y='total_calls',
-                        title="Video Activities Timeline",
-                        labels={'formatted_date': 'Date', 'total_calls': 'Total Calls'},
+            fig = px.bar(df_video, x='date', y='total_calls',
+                        title=f"Video Activities - Last {video_days} Days",
                         color='new_data',
-                        color_continuous_scale='Viridis')
+                        color_continuous_scale='Reds',
+                        hover_data=['video_details', 'telecaller'],
+                        labels={'date': 'Date', 'total_calls': 'Total Calls', 'new_data': 'New Data'})
             
+            fig.update_layout(height=400, xaxis_tickangle=-45)
             st.plotly_chart(fig, use_container_width=True)
             
-            # Video Activities List
-            st.markdown("### Recent Video Activities")
-            for activity in video_activities[:10]:
-                with st.expander(f"{activity['formatted_date']} - {activity['video_details']}"):
-                    st.markdown(f"**Total Calls:** {activity['total_calls']}")
-                    st.markdown(f"**New Data:** {activity['new_data']}")
-                    if activity['other_work']:
-                        st.markdown(f"**Other Work:** {activity['other_work']}")
+            st.markdown("#### Recent Video Activities")
+            for i, activity in enumerate(video_activities[:10]):
+                with st.expander(f"{activity['date']} - {activity.get('telecaller', 'Unknown')}"):
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.markdown(f"**📹 Video Details:** {activity['video_details']}")
+                        st.markdown(f"**📞 Total Calls:** {activity['total_calls']}")
+                    with col2:
+                        st.markdown(f"**📊 New Data:** {activity['new_data']}")
+                        conversion = (activity['new_data'] / activity['total_calls'] * 100) if activity['total_calls'] > 0 else 0
+                        st.markdown(f"**📈 Conversion:** {conversion:.1f}%")
         else:
-            st.info("No video activities recorded.")
+            st.info("No video activities recorded in the selected period.")
     
-    with tab3:
-        # Country Distribution
-        country_dist = processor.get_country_distribution()
+    # Tab 4/3: Country Distribution
+    country_tab_index = 3 if (st.session_state.user_role == 'admin' or can_view_all_reports()) else 2
+    with tab_list[country_tab_index]:
+        st.markdown("### 🌍 Country Distribution")
+        
+        if st.session_state.user_role == 'admin' or can_view_all_reports():
+            country_dist = processor.get_country_distribution()
+        else:
+            country_dist = processor.get_country_distribution(telecaller=st.session_state.telecaller_name)
         
         if country_dist:
-            df_country = pd.DataFrame(list(country_dist.items()), 
-                                     columns=['Country', 'Count'])
+            # Filter out empty countries
+            country_dist = {k: v for k, v in country_dist.items() if k and str(k).strip() and v > 0}
             
-            fig = px.pie(df_country, 
-                        values='Count', 
-                        names='Country',
-                        title="Country Data Distribution",
-                        hole=0.3)
-            
-            st.plotly_chart(fig, use_container_width=True)
-            
-            # Country Table
-            st.markdown("### Country-wise Summary")
-            st.dataframe(df_country.sort_values('Count', ascending=False), 
-                        use_container_width=True)
+            if country_dist:
+                df_country = pd.DataFrame(list(country_dist.items()), columns=['Country', 'Count'])
+                df_country = df_country.sort_values('Count', ascending=False)
+                
+                col1, col2 = st.columns([3, 2])
+                
+                with col1:
+                    fig = px.pie(df_country, 
+                               values='Count', 
+                               names='Country', 
+                               hole=0.3,
+                               title='International Leads Distribution')
+                    fig.update_traces(textposition='inside', textinfo='percent+label')
+                    st.plotly_chart(fig, use_container_width=True)
+                
+                with col2:
+                    st.markdown("#### Country Summary")
+                    total = df_country['Count'].sum()
+                    for _, row in df_country.iterrows():
+                        percentage = (row['Count'] / total * 100)
+                        st.markdown(f"""
+                        **{row['Country']}**: {row['Count']} ({percentage:.1f}%)
+                        <div style="background-color: #f0f2f6; border-radius: 5px; margin-bottom: 10px;">
+                            <div style="background-color: #1976D2; width: {percentage}%; height: 5px; border-radius: 5px;"></div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                
+                st.markdown("#### Detailed Country Data")
+                st.dataframe(df_country, use_container_width=True, hide_index=True)
+            else:
+                st.info("No country data available.")
         else:
             st.info("No country data available.")
 
+# ==================== EDIT HISTORY PAGE ====================
+elif page == "Edit History" and (st.session_state.user_role == 'admin' or can_view_all_reports()):
+    st.markdown('<h1 class="main-header">📝 Edit History</h1>', unsafe_allow_html=True)
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        history_days = st.number_input("Show last N days", min_value=1, max_value=365, value=30, key="history_days")
+    
+    with col2:
+        action_filter = st.selectbox("Action Type", ["All", "EDIT", "DELETE", "ADD"], key="action_filter")
+    
+    with col3:
+        user_filter = st.text_input("Filter by User", placeholder="Enter username", key="user_filter")
+    
+    edit_logs = processor.get_edit_logs()
+    
+    if edit_logs is not None and not edit_logs.empty:
+        filtered_logs = edit_logs.copy()
+        
+        if 'timestamp' in filtered_logs.columns:
+            filtered_logs['timestamp'] = pd.to_datetime(filtered_logs['timestamp'], errors='coerce')
+            cutoff_date = datetime.now() - timedelta(days=history_days)
+            filtered_logs = filtered_logs[filtered_logs['timestamp'] >= cutoff_date]
+        
+        if action_filter != "All" and 'action' in filtered_logs.columns:
+            filtered_logs = filtered_logs[filtered_logs['action'] == action_filter]
+        
+        if user_filter and 'user' in filtered_logs.columns:
+            filtered_logs = filtered_logs[filtered_logs['user'].str.contains(user_filter, case=False, na=False)]
+        
+        st.markdown(f"**Total Edit Actions: {len(filtered_logs)}**")
+        
+        if not filtered_logs.empty:
+            display_cols = ['timestamp', 'user', 'action', 'report_date', 'telecaller']
+            display_cols = [col for col in display_cols if col in filtered_logs.columns]
+            
+            st.dataframe(filtered_logs[display_cols], use_container_width=True, hide_index=True)
+            
+            if can_export_data():
+                csv = filtered_logs.to_csv(index=False)
+                st.download_button(
+                    label="📥 Export Edit History",
+                    data=csv,
+                    file_name=f"edit_history_{datetime.now().strftime('%Y%m%d')}.csv",
+                    mime="text/csv"
+                )
+        else:
+            st.info("No edit history matches your filters.")
+    else:
+        st.info("No edit history available.")
+
+# ==================== USER MANAGEMENT PAGE ====================
+elif page == "User Management" and (st.session_state.user_role == 'admin' or can_manage_users()):
+    st.markdown('<h1 class="main-header">👥 User Management</h1>', unsafe_allow_html=True)
+    
+    user_tabs = st.tabs(["View Users", "Add User", "Manage Permissions"])
+    
+    with user_tabs[0]:
+        users = user_manager.get_all_users()
+        st.markdown("### Current Users")
+        
+        for username, user_info in users.items():
+            with st.container():
+                col1, col2, col3, col4 = st.columns([2, 2, 2, 1])
+                
+                with col1:
+                    st.markdown(f"**{user_info['name']}**")
+                    st.caption(f"@{username}")
+                
+                with col2:
+                    role_color = "badge-admin" if user_info['role'] == 'admin' else "badge-telecaller"
+                    st.markdown(f'<span class="role-badge {role_color}">{user_info["role"].upper()}</span>', 
+                               unsafe_allow_html=True)
+                    st.caption(f"Telecaller: {user_info.get('telecaller_name', 'N/A')}")
+                
+                with col3:
+                    status = "✅ Active" if user_info.get('is_active', True) else "❌ Inactive"
+                    st.markdown(status)
+                    st.caption(f"Created: {user_info.get('created_at', 'N/A')[:10]}")
+                
+                with col4:
+                    if username != 'admin':
+                        if st.button("🗑️", key=f"delete_{username}", help="Delete User"):
+                            success, message = user_manager.delete_user(username)
+                            if success:
+                                st.success(message)
+                                st.rerun()
+                            else:
+                                st.error(message)
+                
+                st.markdown("---")
+    
+    with user_tabs[1]:
+        st.markdown("### Add New User")
+        
+        with st.form("add_user_form"):
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                new_username = st.text_input("Username *", placeholder="Enter username")
+                new_name = st.text_input("Full Name *", placeholder="Enter full name")
+                new_password = st.text_input("Password *", type="password", placeholder="Enter password")
+            
+            with col2:
+                new_role = st.selectbox("Role *", ["telecaller", "admin"])
+                new_telecaller = st.text_input("Telecaller Name", 
+                                              placeholder="Enter telecaller name (if telecaller)")
+                confirm_password = st.text_input("Confirm Password *", type="password", 
+                                                placeholder="Confirm password")
+            
+            submitted = st.form_submit_button("➕ Add User", type="primary", use_container_width=True)
+            
+            if submitted:
+                errors = []
+                if not new_username:
+                    errors.append("Username is required")
+                if not new_name:
+                    errors.append("Full name is required")
+                if not new_password:
+                    errors.append("Password is required")
+                if new_password != confirm_password:
+                    errors.append("Passwords do not match")
+                if new_role == "telecaller" and not new_telecaller:
+                    errors.append("Telecaller name is required for telecaller role")
+                
+                if errors:
+                    for error in errors:
+                        st.error(error)
+                else:
+                    user_data = {
+                        'name': new_name,
+                        'role': new_role,
+                        'telecaller_name': new_telecaller if new_role == "telecaller" else None,
+                        'password': new_password
+                    }
+                    
+                    success, message = user_manager.add_user(new_username, user_data)
+                    if success:
+                        st.success(message)
+                        time.sleep(1)
+                        st.rerun()
+                    else:
+                        st.error(message)
+    
+    with user_tabs[2]:
+        st.markdown("### Manage User Permissions")
+        
+        users = user_manager.get_all_users()
+        usernames = [u for u in users.keys() if u != 'admin']
+        
+        if usernames:
+            selected_user = st.selectbox("Select User", usernames, key="perm_user")
+            
+            if selected_user:
+                user_data = users[selected_user]
+                current_permissions = user_data.get('permissions', {})
+                
+                st.markdown(f"#### Managing permissions for: {user_data['name']}")
+                
+                with st.form("permission_form"):
+                    st.markdown("##### Report Permissions")
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        can_add_reports = st.checkbox("Add Reports", 
+                                                     value=current_permissions.get('can_add_reports', True))
+                        can_edit_own = st.checkbox("Edit Own Reports", 
+                                                  value=current_permissions.get('can_edit_own', True))
+                        can_edit_all = st.checkbox("Edit All Reports", 
+                                                  value=current_permissions.get('can_edit_all', False))
+                    
+                    with col2:
+                        can_delete_all = st.checkbox("Delete Reports", 
+                                                    value=current_permissions.get('can_delete_all', False))
+                        can_view_all = st.checkbox("View All Reports", 
+                                                  value=current_permissions.get('can_view_all', False))
+                        can_export_data_perm = st.checkbox("Export Data", 
+                                                          value=current_permissions.get('can_export_data', False))
+                    
+                    st.markdown("##### System Permissions")
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        can_manage_users_perm = st.checkbox("Manage Users", 
+                                                           value=current_permissions.get('can_manage_users', False))
+                    
+                    with col2:
+                        can_view_analytics = st.checkbox("View Analytics", 
+                                                        value=current_permissions.get('can_view_analytics', True))
+                    
+                    submitted = st.form_submit_button("💾 Save Permissions", type="primary", use_container_width=True)
+                    
+                    if submitted:
+                        permissions = {
+                            'can_add_reports': can_add_reports,
+                            'can_edit_own': can_edit_own,
+                            'can_edit_all': can_edit_all,
+                            'can_delete_all': can_delete_all,
+                            'can_view_all': can_view_all,
+                            'can_export_data': can_export_data_perm,
+                            'can_manage_users': can_manage_users_perm,
+                            'can_view_analytics': can_view_analytics
+                        }
+                        
+                        success, message = user_manager.update_permissions(selected_user, permissions)
+                        if success:
+                            st.success(message)
+                            if selected_user == st.session_state.user:
+                                st.session_state.user_permissions = permissions
+                            time.sleep(1)
+                            st.rerun()
+                        else:
+                            st.error(message)
+        else:
+            st.info("No non-admin users available for permission management.")
+
+# ==================== SYSTEM STATUS PAGE ====================
 elif page == "System Status":
     st.markdown('<h1 class="main-header">⚙️ System Status</h1>', unsafe_allow_html=True)
     
@@ -688,114 +1582,96 @@ elif page == "System Status":
     
     with col1:
         st.markdown("### Connection Status")
-        
         try:
-            # Test connection
-            sheet_names = processor.gs_service.get_sheet_names()
-            
-            if sheet_names:
+            status = processor.check_connection()
+            if status.get('google_sheets', False):
                 st.success("✅ Connected to Google Sheets")
-                
-                # Show available sheets
-                st.markdown("#### Available Sheets:")
-                for sheet in sheet_names:
+                for sheet in status.get('worksheets', []):
                     st.markdown(f"- {sheet}")
-                
-                # Get report count
-                reports = processor.get_all_reports()
-                st.metric("Total Reports", len(reports))
             else:
-                st.error("❌ No sheets found")
-        
+                st.warning("⚠️ Using Local Storage Mode")
+                st.info("Data is stored in local JSON files")
+            
+            reports = processor.get_all_reports()
+            st.metric("Total Reports", len(reports))
+            
+            if st.session_state.user_role == 'admin' or can_view_all_reports():
+                if not reports.empty and 'Telecaller' in reports.columns:
+                    st.metric("Active Telecallers", reports['Telecaller'].nunique())
+            
+            users = user_manager.get_all_users()
+            st.metric("Registered Users", len(users))
         except Exception as e:
             st.error(f"❌ Connection Error: {str(e)}")
     
     with col2:
         st.markdown("### Data Health")
-        
         reports = processor.get_all_reports()
         
         if not reports.empty:
-            # Data quality metrics
             total_records = len(reports)
-            complete_records = reports.notna().all(axis=1).sum()
-            video_records = reports[reports['Video'] == 'Yes'].shape[0]
             
-            col1, col2, col3 = st.columns(3)
-            col1.metric("Total Records", total_records)
-            col2.metric("Complete Records", complete_records)
-            col3.metric("Video Activities", video_records)
-            
-            # Data range
-            if 'Date' in reports.columns and not reports['Date'].isna().all():
-                min_date = reports['Date'].min()
-                max_date = reports['Date'].max()
-                st.markdown(f"**Data Range:** {min_date.strftime('%Y-%m-%d')} to {max_date.strftime('%Y-%m-%d')}")
-            
-            # Missing data analysis
-            st.markdown("#### Missing Data Analysis")
-            missing_data = reports.isnull().sum()
-            missing_df = pd.DataFrame({
-                'Column': missing_data.index,
-                'Missing Values': missing_data.values,
-                'Percentage': (missing_data.values / len(reports) * 100).round(1)
-            })
-            missing_df = missing_df[missing_df['Missing Values'] > 0]
-            
-            if not missing_df.empty:
-                st.dataframe(missing_df, use_container_width=True)
+            if st.session_state.user_role == 'admin' or can_view_all_reports():
+                complete_records = reports.notna().all(axis=1).sum()
+                video_records = reports[reports['Video'] == 'Yes'].shape[0] if 'Video' in reports.columns else 0
+                
+                col1, col2, col3 = st.columns(3)
+                col1.metric("Total Records", total_records)
+                col2.metric("Complete Records", complete_records)
+                col3.metric("Completion Rate", f"{(complete_records/total_records*100):.1f}%")
+                
+                col1, col2 = st.columns(2)
+                col1.metric("Video Activities", video_records)
+                if total_records > 0:
+                    col2.metric("Video Rate", f"{(video_records/total_records*100):.1f}%")
+                
+                edit_logs = processor.get_edit_logs()
+                if edit_logs is not None and not edit_logs.empty:
+                    st.metric("Edit History Entries", len(edit_logs))
             else:
-                st.success("✅ No missing data found!")
+                my_reports = reports[reports['Telecaller'] == st.session_state.telecaller_name]
+                st.metric("My Reports", len(my_reports))
         else:
-            st.info("No data available for analysis")
+            st.info("No data available")
     
-    # System Actions
     st.markdown("---")
     st.markdown("### System Actions")
     
     col1, col2, col3 = st.columns(3)
-    
     with col1:
-        if st.button("🔄 Refresh All Data"):
+        if st.button("🔄 Refresh All Data", use_container_width=True):
             st.cache_data.clear()
+            st.cache_resource.clear()
+            st.success("All caches cleared!")
+            time.sleep(1)
             st.rerun()
-    
     with col2:
-        if st.button("📊 Rebuild Charts"):
+        if st.button("📊 Rebuild Charts", use_container_width=True):
             st.rerun()
-    
     with col3:
-        if st.button("🧹 Clear Cache"):
+        if st.button("🧹 Clear Cache", use_container_width=True):
             st.cache_data.clear()
             st.cache_resource.clear()
             st.success("Cache cleared!")
             time.sleep(1)
             st.rerun()
-    
-    # Data Export
-    st.markdown("---")
-    st.markdown("### Data Export")
-    
-    reports = processor.get_all_reports()
-    if not reports.empty:
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            # CSV Export
-            csv = reports.to_csv(index=False)
-            st.download_button(
-                label="📥 Export All Data (CSV)",
-                data=csv,
-                file_name=f"telecaller_full_export_{datetime.now().strftime('%Y%m%d')}.csv",
-                mime="text/csv"
-            )
-        
-        with col2:
-            # JSON Export
-            json_data = reports.to_json(orient='records', date_format='iso')
-            st.download_button(
-                label="📥 Export All Data (JSON)",
-                data=json_data,
-                file_name=f"telecaller_full_export_{datetime.now().strftime('%Y%m%d')}.json",
-                mime="application/json"
-            )
+
+# Footer
+st.markdown("---")
+footer_col1, footer_col2, footer_col3 = st.columns(3)
+
+with footer_col1:
+    st.markdown("**📞 Telecaller Performance Dashboard**")
+    st.caption("© 2026 All Rights Reserved")
+
+with footer_col2:
+    st.markdown("**Quick Actions**")
+    if st.button("🔄 Refresh", key="footer_refresh"):
+        st.rerun()
+    if st.button("🚪 Logout", key="footer_logout"):
+        logout()
+
+with footer_col3:
+    st.markdown("**System Info**")
+    st.caption(f"Last Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    st.caption(f"Timezone: {time.tzname[0]}")
